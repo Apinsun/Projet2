@@ -1,0 +1,4 @@
+import sys
+print(sys.executable)
+
+Si ce chemin ne contient pas poetry (ou virtualenvs), c'est que tu es dans le mauvais environnement !
