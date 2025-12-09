@@ -13,6 +13,36 @@ from huggingface_hub import InferenceClient
 import time
 from sklearn.metrics import confusion_matrix
 
+def png_from_dir(image_path) :
+    """
+    renvoie la liste des fichiers png dans le répertoire donné en argument
+    
+    :param image_path: le chemin du répertoire à explorer
+    """
+        # Contient tout les éléments du répertoire, ce n'est pas filtré
+    image_paths = [] 
+
+    try:
+        image_paths = os.listdir(image_path)
+    except FileNotFoundError:
+        print(f"Erreur : Le répertoire '{image_path}' n'a pas été trouvé.")
+        image_paths = []
+
+    # Filtrer pour ne garder que les fichiers dont le nom se termine par '.png'
+    noms_fichiers_png = [
+        element for element in image_paths
+        if element.lower().endswith('.png') # .lower() pour une recherche insensible à la casse
+        and os.path.isfile(os.path.join(image_path, element)) # S'assurer que c'est bien un fichier
+    ]
+    #on trie les fichiers pour qu'ils apparaissent dans l'ordre
+    noms_fichiers_png.sort()
+
+    if not image_paths:
+        print(f"Aucune image trouvée dans '{image_path}'. Veuillez y ajouter des images.")
+    else:
+        print(f"{len(noms_fichiers_png)} image(s) à traiter : {noms_fichiers_png}")
+    return noms_fichiers_png
+
 def get_image_dimensions(img_path):
     """
     Get the dimensions of an image.
@@ -117,26 +147,27 @@ def segment_images_batch(list_of_image_paths):
 
     return batch_segmentations
 
-def display_segmented_images_batch(original_image_paths, segmentation_masks):
+def display_segmented_images_batch(original_image_paths, segmentation_masks,noms_masks_png):
     """
     Affiche les images originales et leurs masques segmentés.
 
     Args:
         original_image_paths (list): Liste des chemins des images originales.
         segmentation_masks (list): Liste des masques segmentés (NumPy arrays).
+        noms_masks_png (list): Liste des noms de fichiers des masques de vérité terrain.
+
     """
-    # Matplotlib, ça vous parle ?
-    # Alors... au travail ! 😉
+
     """
-    Affiche les images originales et leurs masques segmentés côte à côte.
+    Affiche les images originales et leurs masques segmentés côte à côte ainsi que les masks fournis.
     """
    # On prépare le dictionnaire inverse (ID -> Nom) une seule fois au début
     # (Supposant que class_mapping est du type {'Fond': 0, 'Chapeau': 1})
     id_to_label = {v: k for k, v in CLASS_MAPPING.items()}
     with PdfPages('rapport_segmentation.pdf') as pdf:
-        
+        avancee = 1 # Compteur de pages
         # Boucle principale
-        for i, (nfp, segmentation_mask) in enumerate(zip(original_image_paths, segmentation_masks)):
+        for nfp, segmentation_mask,nmp in zip(original_image_paths, segmentation_masks,noms_masks_png):
             
             # CORRECTION 1 : On veut 3 colonnes (Originale | Pred | Vérité)
             # figsize agrandi pour accommoder 3 images
@@ -163,8 +194,7 @@ def display_segmented_images_batch(original_image_paths, segmentation_masks):
             axes[1].axis('off')
             
             # --- 3. Vérité Terrain (Droite)  ---
-            mask_filename = mask_filename = nfp.replace("image_", "mask_")
-            mask_path = os.path.join(image_dir_masks, mask_filename) 
+            mask_path = os.path.join(image_dir_masks, nmp) 
             
             try:
                 true_mask_pil = Image.open(mask_path)
@@ -178,7 +208,7 @@ def display_segmented_images_batch(original_image_paths, segmentation_masks):
                 true_mask = np.array(true_mask_pil)
                 
                 axes[2].imshow(true_mask, cmap='tab20', interpolation='nearest', vmin=0, vmax=19)
-                axes[2].set_title(f"Vérité Terrain ({mask_filename})")
+                axes[2].set_title(f"Vérité Terrain ({nmp})")
                 
             except FileNotFoundError:
                 axes[2].text(0.5, 0.5, "Masque non trouvé", ha='center')
@@ -188,37 +218,56 @@ def display_segmented_images_batch(original_image_paths, segmentation_masks):
             axes[2].axis('off')
 
             # calcul de la mean intersection over union
-            acc, miou , _ = calculer_metrics_segmentation(segmentation_mask, true_mask)
+            acc, miou , mean_dice = calculer_metrics_segmentation(segmentation_mask, true_mask)
                 
-            # On prépare le texte à afficher
-            score_text = f"Global Accuracy: {acc:.2%}  |  Mean IoU (mIoU): {miou:.2%}"
+            # Préparer le texte à afficher selon si les métriques existent
+            if np.isnan(mean_dice):
+                dice_text = "mDice: N/A"
+            else:
+                dice_text = f"Mean Dice (mDice): {mean_dice:.2%}"
+
+            if np.isnan(acc) or np.isnan(miou):
+                score_text = dice_text
+            else:
+                score_text = f"Global Accuracy: {acc:.2%}  |  Mean IoU (mIoU): {miou:.2%}  |  {dice_text}"
             
             # Petit bonus couleur : Vert si bon score, Rouge si mauvais
             text_color = "darkgreen" if miou > 0.6 else "firebrick"
 
-            # --- Légende (Dynamique basée sur la prédiction) ---
+            # --- Légende (au niveau de la figure, à droite) ---
             legend_patches = []
-            
-            for idx, val in enumerate(unique_classes):
-                class_id = int(val) # On force en entier Python simple (sécurité anti-bug)
-                
-                if im.norm(class_id) is not None:
-                    color = im.cmap(im.norm(class_id))
-                    label_name = id_to_label.get(class_id, f"Class {class_id}")
-                    patch = mpatches.Patch(color=color, label=label_name)
-                    legend_patches.append(patch)
-            
-            axes[1].legend(handles=legend_patches, loc='lower center', bbox_to_anchor=(0.5, -0.15), ncol=3)
-            
-            # --- Texte en bas ---
-            fig.text(0.5, 0.05, score_text, 
-                     ha='center', va='center', 
-                     fontsize=16, fontweight='bold', color=text_color,
-                     bbox=dict(facecolor='white', alpha=0.9, edgecolor='lightgray'))
+            if segmentation_mask is not None:
+                unique_classes = np.unique(segmentation_mask)
+            else:
+                unique_classes = []
 
-            # Ordre important : tight_layout d'abord, PUIS ajustement manuel pour le bas
-            plt.tight_layout()
-            plt.subplots_adjust(bottom=0.15)
+            if im is not None:
+                for val in unique_classes:
+                    class_id = int(val)
+                    try:
+                        normed = im.norm(class_id)
+                    except Exception:
+                        normed = None
+                    if normed is not None:
+                        color = im.cmap(normed)
+                        label_name = id_to_label.get(class_id, f"Class {class_id}")
+                        legend_patches.append(mpatches.Patch(color=color, label=label_name))
+
+            # Place la légende sur la droite de la figure pour ne pas empiéter en bas
+            if legend_patches:
+                fig.legend(handles=legend_patches, loc='center right',
+                           bbox_to_anchor=(0.98, 0.5), frameon=False,
+                           ncol=1)
+                # Garder un espace suffisant à droite pour la légende
+                plt.subplots_adjust(left=0.03, right=0.78, top=0.94, bottom=0.08)
+            else:
+                plt.subplots_adjust(left=0.03, right=0.98, top=0.94, bottom=0.08)
+
+            # --- Texte de score : bas-centre, bien au-dessus du bord ---
+            fig.text(0.5, 0.04, score_text,
+                     ha='center', va='center',
+                     fontsize=14, fontweight='bold', color=text_color,
+                     bbox=dict(facecolor='white', alpha=0.9, edgecolor='lightgray'))
 
 
             
@@ -226,13 +275,14 @@ def display_segmented_images_batch(original_image_paths, segmentation_masks):
             pdf.savefig(fig) 
             plt.close(fig) 
             
-            print(f"Page {i+1} ajoutée au PDF.")
+            print(f"Page {avancee} ajoutée au PDF.")
+            avancee+=1
 
         print("Terminé ! Le fichier 'rapport_segmentation.pdf' est prêt.")
 
 def calculer_metrics_segmentation(pred_mask, true_mask, num_classes=18):
     """
-    Calcule la précision globale et la mIoU pour une segmentation multi-classes.
+    Calcule la précision globale et la mIoU et le mDice pour une segmentation multi-classes.
     
     Args:
         pred_mask (numpy array): Ta prédiction (2D, valeurs 0-17)
@@ -243,6 +293,7 @@ def calculer_metrics_segmentation(pred_mask, true_mask, num_classes=18):
         pixel_acc (float): Précision globale (attention au piège du fond - le background fait que la segmentation peut sembler assez bonne).
         miou (float): Mean Intersection over Union (le score principal).
         iou_par_classe (array): Le score IoU détaillé pour chaque classe.
+        mean_dice (float): Dice moyen (mDice).
     """
     # 1. Aplatir les images en 1D (nécessaire pour la matrice de confusion)
     # On convertit en entiers pour être sûr
@@ -273,14 +324,20 @@ def calculer_metrics_segmentation(pred_mask, true_mask, num_classes=18):
     # On remplace ces NaNs par 0.0 pour pouvoir faire la moyenne.
     iou_par_classe = np.nan_to_num(iou_par_classe)
 
-    # 5. Calculer les scores finaux
+    # 5. Dice (F1) par classe : 2 * TP / (pred + gt)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        dice_par_classe = (2.0 * intersection) / (predicted_set + ground_truth_set)
+    dice_par_classe = np.nan_to_num(dice_par_classe)
+
+    # 6. Calculer les scores finaux
     # mIoU : Moyenne des IoU de toutes les classes
     miou = np.mean(iou_par_classe)
+    mean_dice = np.mean(dice_par_classe)
     
     # Précision Globale : Total des bons pixels / Total des pixels
     pixel_acc = np.sum(intersection) / np.sum(cm)
     
-    return pixel_acc, miou, iou_par_classe
+    return pixel_acc, miou, mean_dice
 
 #variables globales
 image_dir = "./images_a_segmenter/top_influenceurs_2024/IMG"  # nom du répertoire contenant les images
@@ -328,23 +385,10 @@ def main():
         print("❌ Erreur : Le token n'a pas été trouvé. Vérifiez le fichier .env.")
 
 
-    # Contient tout les éléments du répertoire, ce n'est pas filtré
-    image_paths = [] 
+    noms_fichiers_png = png_from_dir(image_dir)
+    noms_masks_png = png_from_dir(image_dir_masks)
 
-    try:
-        image_paths = os.listdir(image_dir)
-    except FileNotFoundError:
-        print(f"Erreur : Le répertoire '{image_dir}' n'a pas été trouvé.")
-        image_paths = []
-
-    # Filtrer pour ne garder que les fichiers dont le nom se termine par '.png'
-    noms_fichiers_png = [
-        element for element in image_paths
-        if element.lower().endswith('.png') # .lower() pour une recherche insensible à la casse
-        and os.path.isfile(os.path.join(image_dir, element)) # S'assurer que c'est bien un fichier
-    ]
-
-    if not image_paths:
+    if not noms_fichiers_png:
         print(f"Aucune image trouvée dans '{image_dir}'. Veuillez y ajouter des images.")
     else:
         print(f"{len(noms_fichiers_png)} image(s) à traiter : {noms_fichiers_png}")
@@ -360,7 +404,7 @@ def main():
 
     # Afficher les résultats du batch
     if batch_seg_results:
-        display_segmented_images_batch(noms_fichiers_png, batch_seg_results)
+        display_segmented_images_batch(noms_fichiers_png, batch_seg_results,noms_masks_png)
     else:
         print("Aucun résultat de segmentation à afficher.")
 
