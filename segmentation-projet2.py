@@ -212,12 +212,21 @@ def display_segmented_images_batch(original_image_paths, segmentation_masks,noms
    # On prépare le dictionnaire inverse (ID -> Nom) une seule fois au début
     # (Supposant que class_mapping est du type {'Fond': 0, 'Chapeau': 1})
     id_to_label = {v: k for k, v in CLASS_MAPPING.items()}
+
+# --- Listes pour stocker les métriques globales ---
+    all_acc = []
+    all_miou = []
+    all_dice = []
+
     with PdfPages('rapport_segmentation.pdf') as pdf:
         avancee = 1 # Compteur de pages
         # Boucle principale
         for nfp, segmentation_mask,nmp in zip(original_image_paths, segmentation_masks,noms_masks_png):
             
-            # CORRECTION 1 : On veut 3 colonnes (Originale | Pred | Vérité)
+            # (Initialisation des variables métriques pour cette itération)
+            acc, miou, mean_dice = np.nan, np.nan, np.nan
+
+            # 3 colonnes (Originale | Pred | Vérité)
             # figsize agrandi pour accommoder 3 images
             fig, axes = plt.subplots(1, 3, figsize=(20, 8)) 
             
@@ -269,8 +278,17 @@ def display_segmented_images_batch(original_image_paths, segmentation_masks,noms
             
             axes[2].axis('off')
 
-            # calcul de la mean intersection over union
-            acc, miou , mean_dice = calculer_metrics_segmentation(segmentation_mask, true_mask)
+        # --- CALCUL DES MÉTRIQUES ---
+            if segmentation_mask is not None:
+                acc, miou, mean_dice = calculer_metrics_segmentation(segmentation_mask, true_mask)
+                
+                # AJOUT : On stocke les valeurs dans les listes globales
+                all_acc.append(acc)
+                all_miou.append(miou)
+                all_dice.append(mean_dice)
+            else:
+                # Si pas de segmentation, on peut choisir d'ignorer ou mettre 0
+                pass
                 
             # Préparer le texte à afficher selon si les métriques existent
             if np.isnan(mean_dice):
@@ -330,7 +348,97 @@ def display_segmented_images_batch(original_image_paths, segmentation_masks,noms
             print(f"Page {avancee} ajoutée au PDF.")
             avancee+=1
 
-        print("Terminé ! Le fichier 'rapport_segmentation.pdf' est prêt.")
+        # ============================================================
+        # ===         GÉNÉRATION DU RAPPORT FINAL GLOBAL           ===
+        # ============================================================
+        
+        print("Génération du rapport statistique global...")
+        
+        # On convertit en numpy array pour faciliter les calculs et gérer les NaNs
+        arr_acc = np.array(all_acc)
+        arr_miou = np.array(all_miou)
+        arr_dice = np.array(all_dice)
+
+        # Création d'une nouvelle figure pour le résumé
+        fig_summary = plt.figure(figsize=(20, 12))
+        fig_summary.suptitle("Rapport Statistique Global de Segmentation", fontsize=24, fontweight='bold')
+
+        # --- 1. Graphique : Boxplots (Boîtes à moustaches) ---
+        # Permet de voir la distribution : Médiane, quartiles, et valeurs extrêmes
+        ax1 = fig_summary.add_subplot(2, 1, 1) # Haut
+        
+        data_to_plot = [arr_acc, arr_miou, arr_dice]
+        labels = ['Pixel Accuracy', 'Mean IoU (mIoU)', 'Mean Dice (mDice)']
+        
+        # On filtre les NaN au cas où
+        data_to_plot = [d[~np.isnan(d)] for d in data_to_plot]
+
+        bplot = ax1.boxplot(data_to_plot, patch_artist=True, tick_labels=labels, vert=False)
+        
+        # Couleurs des boîtes
+        colors = ['lightblue', 'lightgreen', 'plum']
+        for patch, color in zip(bplot['boxes'], colors):
+            patch.set_facecolor(color)
+        
+        ax1.set_title("Distribution des scores sur tout le dataset", fontsize=16)
+        ax1.set_xlabel("Score (0.0 à 1.0)", fontsize=12)
+        ax1.grid(True, linestyle='--', alpha=0.6)
+        
+        # Ajout des points individuels (jitter) pour voir la dispersion réelle
+        for i, data in enumerate(data_to_plot):
+            y = np.random.normal(i + 1, 0.04, size=len(data))
+            ax1.plot(data, y, 'r.', alpha=0.5)
+
+        # --- 2. Tableau des Statistiques ---
+        ax2 = fig_summary.add_subplot(2, 1, 2) # Bas
+        ax2.axis('off') # On cache les axes classiques pour dessiner un tableau
+        
+        # Calcul des stats
+        rows = ['Moyenne', 'Médiane', 'Minimum', 'Maximum', 'Écart-type (Std)']
+        cols = ['Pixel Accuracy', 'mIoU', 'mDice']
+        
+        cell_text = []
+        for d in [arr_acc, arr_miou, arr_dice]:
+            # On utilise np.nanmean, etc pour ignorer les erreurs
+            if len(d) > 0:
+                cell_text.append([
+                    f"{np.nanmean(d):.2%}",
+                    f"{np.nanmedian(d):.2%}",
+                    f"{np.nanmin(d):.2%}",
+                    f"{np.nanmax(d):.2%}",
+                    f"{np.nanstd(d):.4f}"
+                ])
+            else:
+                cell_text.append(["N/A"] * 5)
+        
+        # Le tableau attend les données transposées (Lignes = Stats, Colonnes = Métriques)
+        cell_text = np.array(cell_text).T 
+
+        # Création du tableau
+        table = ax2.table(cellText=cell_text,
+                          rowLabels=rows,
+                          colLabels=cols,
+                          cellLoc='center',
+                          loc='center',
+                          bbox=[0.1, 0.1, 0.8, 0.8]) # Centré
+        
+        table.auto_set_font_size(False)
+        table.set_fontsize(14)
+        table.scale(1, 2) # Agrandir les cellules verticalement
+
+        # Coloriage léger des en-têtes
+        for (i, j), cell in table.get_celld().items():
+            if i == 0:
+                cell.set_text_props(weight='bold', color='white')
+                cell.set_facecolor('darkblue')
+            elif j == -1: # Row labels
+                cell.set_text_props(weight='bold')
+                cell.set_facecolor('#f2f2f2')
+
+        pdf.savefig(fig_summary)
+        plt.close(fig_summary)
+        
+        print("Rapport PDF généré avec succès (incluant la page de résumé final) !")
 
 def calculer_metrics_segmentation(pred_mask, true_mask, num_classes=18):
     """
