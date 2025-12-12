@@ -1,17 +1,16 @@
 import os
-import requests
 from PIL import Image
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 from tqdm import tqdm
-import base64
 import io
 from dotenv import load_dotenv
 from huggingface_hub import InferenceClient
 import time
 from sklearn.metrics import confusion_matrix
+from huggingface_hub.utils import HfHubHTTPError
 
 def png_from_dir(image_path) :
     """
@@ -39,10 +38,6 @@ def png_from_dir(image_path) :
     #on trie les fichiers pour qu'ils apparaissent dans l'ordre
     noms_fichiers_png.sort()
 
-    if not image_paths:
-        print(f"Aucune image trouvée dans '{image_path}'. Veuillez y ajouter des images.")
-    else:
-        print(f"{len(noms_fichiers_png)} image(s) à traiter : {noms_fichiers_png}")
     return noms_fichiers_png
 
 def get_image_dimensions(img_path):
@@ -121,40 +116,82 @@ def segment_images_batch(list_of_image_paths):
               Contient None si une image n'a pas pu être traitée.
     """
     batch_segmentations = []
-
-
-    # Maintenant, on utilise l'API huggingface
-    # ainsi que les fonctions données plus haut pour ségmenter nos images.
-    imageType = "image/png"
-    headers["Content-Type"] = imageType
-
-
+# Configuration des tentatives
+    MAX_RETRIES = 5  # Nombre max de tentatives pour une même image
+    BASE_WAIT_TIME = 2 # Temps d'attente de base en secondes
 
     client = InferenceClient(
-    provider="hf-inference",
-    api_key=api_token,
+        provider="hf-inference",
+        api_key=api_token,
     )
-    for ip in tqdm(list_of_image_paths) :
+
+    for ip in tqdm(list_of_image_paths, desc="Segmentation en cours"):
+        image_path = os.path.join(image_dir, ip)
+        segmentation_mask = None # Par défaut à None en cas d'échec total
+
+        # --- 1. Préparation de l'image ---
         try:
-    # Lire l'image en binaire
-    # Et mettez le contenu de l'image dans la variable image_data
-            image_path =  os.path.join(image_dir, ip)
-            try:
-                image_w, image_h = get_image_dimensions(image_path)
-            except Exception as e:
-                print(f"Skipping {ip}: impossible d'ouvrir/lire l'image ({e})")
-                batch_segmentations.append(None) # on ajoute tout de même pour garder l'alignement avec l'autre liste de masques
-                continue
-            try:
-                response = client.image_segmentation(image_path, model="sayeed99/segformer_b3_clothes")
-                segmentation_mask = create_masks(response, image_w, image_h)
-                batch_segmentations.append(segmentation_mask)
-            except Exception as e:
-                print(f"Erreur de segmentation pour {ip}: {e}")
-                batch_segmentations.append(None)
-            time.sleep(0.1)
+            image_w, image_h = get_image_dimensions(image_path)
         except Exception as e:
-            print(f"Une erreur est survenue : {e}")
+            print(f"❌ [Fatal] Impossible de lire {ip}: {e}")
+            batch_segmentations.append(None)
+            continue
+
+        # --- 2. Boucle de tentative d'appel API ---
+        for attempt in range(MAX_RETRIES):
+            try:
+                # Appel API
+                response = client.image_segmentation(
+                    image_path, 
+                    model="sayeed99/segformer_b3_clothes"
+                )
+                
+                # Si succès, on traite et on sort de la boucle "attempt"
+                segmentation_mask = create_masks(response, image_w, image_h)
+                break 
+
+            except HfHubHTTPError as e:
+                # --- Gestion fine des codes HTTP ---
+                
+                # CAS A : Le modèle est en train de charger (Cold Boot)
+                if e.response.status_code == 503:
+                    # L'API nous donne souvent une estimation du temps d'attente
+                    estimated_time = e.response.headers.get("x-compute-time-left")
+                    wait_time = float(estimated_time) if estimated_time else BASE_WAIT_TIME * (attempt + 1)
+                    
+                    print(f"⏳ {ip}: Modèle en chargement... Attente de {wait_time:.1f}s (Tentative {attempt+1}/{MAX_RETRIES})")
+                    time.sleep(wait_time)
+                    continue # On recommence la boucle
+
+                # CAS B : Rate Limit (Trop de requêtes)
+                elif e.response.status_code == 429:
+                    wait_time = BASE_WAIT_TIME * (2 ** attempt) # Backoff exponentiel (2s, 4s, 8s...)
+                    print(f"✋ {ip}: Rate limit atteint. Pause de {wait_time}s.")
+                    time.sleep(wait_time)
+                    continue
+
+                # CAS C : Erreur Fatale (Image trop grosse, Mauvaise requête)
+                elif 400 <= e.response.status_code < 500:
+                    print(f"❌ {ip}: Erreur client fatale ({e.response.status_code}). Image ignorée.")
+                    print(f"   Détail: {e}")
+                    break # On arrête les tentatives pour cette image
+
+                # CAS D : Erreur Serveur (Crash interne chez HF)
+                elif e.response.status_code >= 500:
+                    print(f"⚠️ {ip}: Erreur serveur HF ({e.response.status_code})... On réessaie.")
+                    time.sleep(BASE_WAIT_TIME)
+                    continue
+            
+            except Exception as e:
+                # Erreurs non liées à l'API (bug de code, parsing, réseau coupé)
+                print(f"❌ {ip}: Erreur inattendue : {e}")
+                break
+        
+        # Ajout du résultat (mask ou None si toutes les tentatives ont échoué)
+        batch_segmentations.append(segmentation_mask)
+        
+        # Petite pause de courtoisie entre chaque image réussie pour éviter le 429
+        time.sleep(0.5)
 
     return batch_segmentations
 
@@ -406,7 +443,7 @@ def main():
     if not noms_fichiers_png:
         print(f"Aucune image trouvée dans '{image_dir}'. Veuillez y ajouter des images.")
     else:
-        print(f"{len(noms_fichiers_png)} image(s) à traiter : {noms_fichiers_png}")
+        print(f"{len(noms_fichiers_png)} image(s) à traiter")
 
     # Appeler la fonction pour segmenter les images listées dans image_paths
     if noms_fichiers_png:
