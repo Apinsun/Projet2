@@ -17,7 +17,9 @@ def png_from_dir(image_path) :
     """
     renvoie la liste des fichiers png dans le répertoire donné en argument
     
-    :param image_path: le chemin du répertoire à explorer
+    Args image_path(str): le chemin du répertoire à explorer
+
+    Returns (str[]): retourne une liste contenant le noms des fichiers se terminant par .png
     """
         # Contient tout les éléments du répertoire, ce n'est pas filtré
     image_paths = [] 
@@ -137,10 +139,19 @@ def segment_images_batch(list_of_image_paths):
     # Lire l'image en binaire
     # Et mettez le contenu de l'image dans la variable image_data
             image_path =  os.path.join(image_dir, ip)
-            image_w, image_h = get_image_dimensions(image_path)
-            response = client.image_segmentation(image_path, model="sayeed99/segformer_b3_clothes")
-            segmentation_mask = create_masks(response, image_w, image_h)
-            batch_segmentations.append(segmentation_mask)
+            try:
+                image_w, image_h = get_image_dimensions(image_path)
+            except Exception as e:
+                print(f"Skipping {ip}: impossible d'ouvrir/lire l'image ({e})")
+                batch_segmentations.append(None) # on ajoute tout de même pour garder l'alignement avec l'autre liste de masques
+                continue
+            try:
+                response = client.image_segmentation(image_path, model="sayeed99/segformer_b3_clothes")
+                segmentation_mask = create_masks(response, image_w, image_h)
+                batch_segmentations.append(segmentation_mask)
+            except Exception as e:
+                print(f"Erreur de segmentation pour {ip}: {e}")
+                batch_segmentations.append(None)
             time.sleep(0.1)
         except Exception as e:
             print(f"Une erreur est survenue : {e}")
@@ -188,8 +199,12 @@ def display_segmented_images_batch(original_image_paths, segmentation_masks,noms
             # --- Notre segmentation au milieu ---
             unique_classes = np.unique(segmentation_mask)
             
+            if segmentation_mask is None:
+                axes[1].text(0.5, 0.5, "Segmentation indisponible", ha='center')
+                im = None
+            else:
             # On stocke l'objet 'im' pour récupérer les couleurs pour la légende
-            im = axes[1].imshow(segmentation_mask, cmap='tab20', interpolation='nearest', vmin=0, vmax=19)
+                im = axes[1].imshow(segmentation_mask, cmap='tab20', interpolation='nearest', vmin=0, vmax=19)
             axes[1].set_title("Prédiction IA")
             axes[1].axis('off')
             
