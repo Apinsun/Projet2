@@ -508,24 +508,28 @@ def calculer_metrics_segmentation(pred_mask, true_mask, num_classes=18):
     predicted_set = cm.sum(axis=0)    # TP + FP
     union = ground_truth_set + predicted_set - intersection
 
-    # 4. Calculer l'IoU par classe
-    # On utilise un contexte numpy pour éviter les warnings si une classe est absente (division par 0)
+    classes_presentes = union > 0 # Booléen : Vrai si la classe est présente dans l'image
+
+    # 4. Calcul IoU
     with np.errstate(divide='ignore', invalid='ignore'):
         iou_par_classe = intersection / union
-    
-    # Si une classe n'existe pas dans l'image, l'union est 0, ce qui donne un NaN (Not a Number).
-    # On remplace ces NaNs par 0.0 pour pouvoir faire la moyenne.
-    iou_par_classe = np.nan_to_num(iou_par_classe)
+
+    # gestion d'erreur, cas où on aurait aucune classe présente
+    if np.sum(classes_presentes) == 0:
+        miou = 0.0
+    else:
+        # On fait la moyenne uniquement sur les classes pertinentes
+        miou = np.mean(iou_par_classe[classes_presentes])
 
     # 5. Dice (F1) par classe : 2 * TP / (Zone réelle + Zone prédite)
     with np.errstate(divide='ignore', invalid='ignore'):
         dice_par_classe = (2.0 * intersection) / (predicted_set + ground_truth_set)
     dice_par_classe = np.nan_to_num(dice_par_classe)
 
-    # 6. Calculer les scores finaux
-    # mIoU : Moyenne des IoU de toutes les classes
-    miou = np.mean(iou_par_classe)
-    mean_dice = np.mean(dice_par_classe)
+    if np.sum(classes_presentes) == 0:
+        mean_dice = 0.0
+    else:
+        mean_dice = np.mean(dice_par_classe[classes_presentes])
     
     # Précision Globale : Total des bons pixels / Total des pixels
     pixel_acc = np.sum(intersection) / np.sum(cm)
