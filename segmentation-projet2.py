@@ -88,6 +88,7 @@ def create_masks(results, width, height):
             continue
             
         # Appel de la fonction corrigée qui gère les deux types (PIL ou Bytes)
+        # C'est decode_mask_bytes qui fait le redimensionnement à la taille originale !
         mask_array = decode_mask_bytes(result['mask'], width, height)
         
         # On applique le masque
@@ -127,69 +128,100 @@ def segment_images_batch(list_of_image_paths):
 
     for ip in tqdm(list_of_image_paths, desc="Segmentation en cours"):
         image_path = os.path.join(image_dir, ip)
+        path_to_send = image_path # Par défaut, on envoie l'originale
+        is_temp_file = False # Marqueur pour savoir si on doit supprimer le fichier après
         segmentation_mask = None # Par défaut à None en cas d'échec total
+        MAX_DIMENSION = 1024  # Dimension maximale en hauteur comme en largeur de nos images
+        TEMP_FILENAME = "temp_resized_buffer.png" # Nom du fichier temporaire
 
         # --- 1. Préparation de l'image ---
         try:
-            image_w, image_h = get_image_dimensions(image_path)
+            original_image = Image.open(image_path)
+            image_w, image_h = original_image.size
+
+            # Si l'image est trop grande, on crée le fichier temporaire
+            if max(image_w, image_h) > MAX_DIMENSION:
+                scale_factor = MAX_DIMENSION / max(image_w, image_h)
+                new_size = (int(image_w * scale_factor), int(image_h * scale_factor))
+                
+                # On redimensionne
+                resized_img = original_image.resize(new_size, Image.Resampling.LANCZOS)
+                
+                # On sauvegarde sur le disque
+                resized_img.save(TEMP_FILENAME, format="PNG")
+                
+                # On change le chemin à envoyer
+                path_to_send = TEMP_FILENAME
+                is_temp_file = True
         except Exception as e:
             print(f"❌ [Fatal] Impossible de lire {ip}: {e}")
             batch_segmentations.append(None)
             continue
 
         # --- 2. Boucle de tentative d'appel API ---
-        for attempt in range(MAX_RETRIES):
-            try:
-                # Appel API
-                response = client.image_segmentation(
-                    image_path, 
-                    model="sayeed99/segformer_b3_clothes"
-                )
-                
-                # Si succès, on traite et on sort de la boucle "attempt"
-                segmentation_mask = create_masks(response, image_w, image_h)
-                break 
-
-            except HfHubHTTPError as e:
-                # --- Gestion fine des codes HTTP ---
-                
-                # CAS A : Le modèle est en train de charger (Cold Boot)
-                if e.response.status_code == 503:
-                    # L'API nous donne souvent une estimation du temps d'attente
-                    estimated_time = e.response.headers.get("x-compute-time-left")
-                    wait_time = float(estimated_time) if estimated_time else BASE_WAIT_TIME * (attempt + 1)
+        try:
+            for attempt in range(MAX_RETRIES):
+                try:
+                    # Appel API
+                    response = client.image_segmentation(
+                        path_to_send, 
+                        model="sayeed99/segformer_b3_clothes"
+                    )
                     
-                    print(f"⏳ {ip}: Modèle en chargement... Attente de {wait_time:.1f}s (Tentative {attempt+1}/{MAX_RETRIES})")
-                    time.sleep(wait_time)
-                    continue # On recommence la boucle
+                    # Si succès, on traite et on sort de la boucle "attempt"
+                    # /!\ on passe les dimensions originales, create_mask va redimensionner aux proportions originales
+                    segmentation_mask = create_masks(response, image_w, image_h)
+                    break 
 
-                # CAS B : Rate Limit (Trop de requêtes)
-                elif e.response.status_code == 429:
-                    wait_time = BASE_WAIT_TIME * (2 ** attempt) # Backoff exponentiel (2s, 4s, 8s...)
-                    print(f"✋ {ip}: Rate limit atteint. Pause de {wait_time}s.")
-                    time.sleep(wait_time)
-                    continue
+                except HfHubHTTPError as e:
+                    # --- Gestion fine des codes HTTP ---
+                    
+                    # CAS A : Le modèle est en train de charger (Cold Boot)
+                    if e.response.status_code == 503:
+                        # L'API nous donne souvent une estimation du temps d'attente
+                        estimated_time = e.response.headers.get("x-compute-time-left")
+                        wait_time = float(estimated_time) if estimated_time else BASE_WAIT_TIME * (attempt + 1)
+                        
+                        print(f"⏳ {ip}: Modèle en chargement... Attente de {wait_time:.1f}s (Tentative {attempt+1}/{MAX_RETRIES})")
+                        time.sleep(wait_time)
+                        continue # On recommence la boucle
 
-                # CAS C : Erreur Fatale (Image trop grosse, Mauvaise requête)
-                elif 400 <= e.response.status_code < 500:
-                    print(f"❌ {ip}: Erreur client fatale ({e.response.status_code}). Image ignorée.")
-                    print(f"   Détail: {e}")
-                    break # On arrête les tentatives pour cette image
+                    # CAS B : Rate Limit (Trop de requêtes)
+                    elif e.response.status_code == 429:
+                        wait_time = BASE_WAIT_TIME * (2 ** attempt) # Backoff exponentiel (2s, 4s, 8s...)
+                        print(f"✋ {ip}: Rate limit atteint. Pause de {wait_time}s.")
+                        time.sleep(wait_time)
+                        continue
 
-                # CAS D : Erreur Serveur (Crash interne chez HF)
-                elif e.response.status_code >= 500:
-                    print(f"⚠️ {ip}: Erreur serveur HF ({e.response.status_code})... On réessaie.")
-                    time.sleep(BASE_WAIT_TIME)
-                    continue
+                    # CAS C : Erreur Fatale (Image trop grosse, Mauvaise requête)
+                    elif 400 <= e.response.status_code < 500:
+                        print(f"❌ {ip}: Erreur client fatale ({e.response.status_code}). Image ignorée.")
+                        print(f"   Détail: {e}")
+                        break # On arrête les tentatives pour cette image
+
+                    # CAS D : Erreur Serveur (Crash interne chez HF)
+                    elif e.response.status_code >= 500:
+                        print(f"⚠️ {ip}: Erreur serveur HF ({e.response.status_code})... On réessaie.")
+                        time.sleep(BASE_WAIT_TIME)
+                        continue
+                
+                except Exception as e:
+                    # Erreurs non liées à l'API (bug de code, parsing, réseau coupé)
+                    print(f"❌ {ip}: Erreur inattendue : {e}")
+                    break
             
-            except Exception as e:
-                # Erreurs non liées à l'API (bug de code, parsing, réseau coupé)
-                print(f"❌ {ip}: Erreur inattendue : {e}")
-                break
+            # Ajout du résultat (mask ou None si toutes les tentatives ont échoué)
+            batch_segmentations.append(segmentation_mask)
         
-        # Ajout du résultat (mask ou None si toutes les tentatives ont échoué)
-        batch_segmentations.append(segmentation_mask)
-        
+        finally:
+            # --- 3. Nettoyage (Le plus important !) ---
+            # Quoi qu'il arrive (succès ou erreur), on supprime le fichier temporaire
+            if is_temp_file and os.path.exists(TEMP_FILENAME):
+                try:
+                    os.remove(TEMP_FILENAME)
+                except Exception as e:
+                    print(f"⚠️ Impossible de supprimer le fichier temporaire : {e}")
+
         # Petite pause de courtoisie entre chaque image réussie pour éviter le 429
         time.sleep(0.5)
 
@@ -445,9 +477,9 @@ def calculer_metrics_segmentation(pred_mask, true_mask, num_classes=18):
     Calcule la précision globale et la mIoU et le mDice pour une segmentation multi-classes.
     
     Args:
-        pred_mask (numpy array): Ta prédiction (2D, valeurs 0-17)
-        true_mask (numpy array): La vérité terrain (2D, valeurs 0-17, MÊME TAILLE !)
-        num_classes (int): Nombre total de classes possibles (18 pour toi).
+        pred_mask (numpy array): La prédiction renvoyé par le modèle (2D, valeurs 0-17)
+        true_mask (numpy array): La vérité terrain (2D, valeurs 0-17, MÊME TAILLE que pred_mask!)
+        num_classes (int): Nombre total de classes possibles
         
     Returns:
         pixel_acc (float): Précision globale (attention au piège du fond - le background fait que la segmentation peut sembler assez bonne).
@@ -467,12 +499,13 @@ def calculer_metrics_segmentation(pred_mask, true_mask, num_classes=18):
 
     # 3. Calculer les Intersections et Unions à partir de la matrice
     
-    # Intersection : C'est la diagonale de la matrice (quand pred == true)
+    # Intersection : C'est la diagonale de la matrice ( les true positifs)
     intersection = np.diag(cm)
     
     # Union : C'est la somme de la ligne + somme de la colonne - l'intersection (pour ne pas la compter deux fois)
-    ground_truth_set = cm.sum(axis=1) # Total réel pour chaque classe
-    predicted_set = cm.sum(axis=0)    # Total prédit pour chaque classe
+    # L'union représente l'aire qui a été prédite à tort OU qui aurait dû être prédite donc TP + FP + FN
+    ground_truth_set = cm.sum(axis=1) # TP + FN
+    predicted_set = cm.sum(axis=0)    # TP + FP
     union = ground_truth_set + predicted_set - intersection
 
     # 4. Calculer l'IoU par classe
@@ -484,7 +517,7 @@ def calculer_metrics_segmentation(pred_mask, true_mask, num_classes=18):
     # On remplace ces NaNs par 0.0 pour pouvoir faire la moyenne.
     iou_par_classe = np.nan_to_num(iou_par_classe)
 
-    # 5. Dice (F1) par classe : 2 * TP / (pred + gt)
+    # 5. Dice (F1) par classe : 2 * TP / (Zone réelle + Zone prédite)
     with np.errstate(divide='ignore', invalid='ignore'):
         dice_par_classe = (2.0 * intersection) / (predicted_set + ground_truth_set)
     dice_par_classe = np.nan_to_num(dice_par_classe)
