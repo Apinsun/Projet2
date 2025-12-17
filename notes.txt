@@ -1,4 +1,11 @@
 import sys
 print(sys.executable)
 
-Si ce chemin ne contient pas poetry (ou virtualenvs), c'est que tu es dans le mauvais environnement !
+Si ce chemin ne contient pas poetry (ou virtualenvs), c'est que tu es dans le mauvais environnement
+
+
+nuances entre les fichiers générés par poetry :
+
+    pyproject.toml (Les contraintes) : Ce fichier liste les dépendances "logiques" avec des contraintes (ex: pandas = "^1.3"). Il dit ce que le projet aimerait avoir.
+
+    poetry.lock (La vérité terrain - LE fichier clé) : Ce fichier est généré par Poetry. Il "gèle" (lock) les versions exactes de toutes les dépendances (et sous-dépendances) installées sur ta machine, y compris leur hachage cryptographique (hash). !
