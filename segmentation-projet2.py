@@ -249,6 +249,8 @@ def display_segmented_images_batch(original_image_paths, segmentation_masks,noms
     all_acc = []
     all_miou = []
     all_dice = []
+    num_classes = len(CLASS_MAPPING)
+    global_conf_matrix = np.zeros((num_classes, num_classes))
 
     with PdfPages('rapport_segmentation.pdf') as pdf:
         avancee = 1 # Compteur de pages
@@ -312,8 +314,9 @@ def display_segmented_images_batch(original_image_paths, segmentation_masks,noms
 
         # --- CALCUL DES MÉTRIQUES ---
             if segmentation_mask is not None:
-                acc, miou, mean_dice = calculer_metrics_segmentation(segmentation_mask, true_mask)
-                
+                acc, miou, mean_dice, per_image_conf_matrix = calculer_metrics_segmentation(segmentation_mask, true_mask)
+                # Mise à jour de la matrice de confusion globale
+                global_conf_matrix += per_image_conf_matrix
                 # AJOUT : On stocke les valeurs dans les listes globales
                 all_acc.append(acc)
                 all_miou.append(miou)
@@ -481,6 +484,84 @@ def display_segmented_images_batch(original_image_paths, segmentation_masks,noms
 
         pdf.savefig(fig_summary)
         plt.close(fig_summary)
+
+        # ============================================================
+        # === PAGE DE RÉSUMÉ 2 : PERFORMANCE GLOBALE PAR CLASSE    ===
+        # ============================================================
+        print("Génération Résumé 2 (Global Metrics)...")
+        
+        # 1. Calcul des scores globaux depuis la matrice cumulée
+        # Formule : IoU = TP / (TP + FP + FN)
+        intersection = np.diag(global_conf_matrix) # TP
+        ground_truth_set = global_conf_matrix.sum(axis=1) # TP + FN
+        predicted_set = global_conf_matrix.sum(axis=0)    # TP + FP
+        union = ground_truth_set + predicted_set - intersection
+        
+        # IoU par classe (évite division par 0)
+        iou_per_class = np.divide(intersection, union, out=np.zeros_like(intersection, dtype=float), where=union!=0)
+        
+        # Global mIoU (Moyenne des IoU valides seulement)
+        valid_classes = union > 0
+        global_miou_score = np.mean(iou_per_class[valid_classes])
+
+        # 2. Création de la figure
+        fig_global = plt.figure(figsize=(20, 12))
+        
+        # Titre Principal
+        fig_global.suptitle(f"Résumé 2 : Performance Globale (Global mIoU: {global_miou_score:.2%})", 
+                            fontsize=22, fontweight='bold', color='darkblue')
+
+        ax_table = fig_global.add_subplot(1, 1, 1)
+        ax_table.axis('off')
+
+        # 3. Préparation des données pour le tableau
+        table_data = []
+        # En-têtes
+        col_labels = ["ID", "Nom de la Classe", "IoU Global", "Pixels Totaux (Vérité)"]
+        
+        for class_id in range(num_classes):
+            class_name = id_to_label.get(class_id, f"Class {class_id}")
+            iou_val = iou_per_class[class_id]
+            pixel_count = ground_truth_set[class_id] # Combien de fois cette classe apparait réellement
+            
+            # On affiche seulement si la classe existe dans le dataset (ou si on veut tout voir)
+            # Ici on affiche tout, mais on met "-" si pas présent
+            if pixel_count > 0 or predicted_set[class_id] > 0:
+                iou_txt = f"{iou_val:.2%}"
+                # Petit indicateur visuel (Vert si > 50%, Rouge sinon)
+                status = "[OK]" if iou_val > 0.5 else "[!]"
+            else:
+                iou_txt = "N/A (Absent)"
+                status = "-"
+
+            table_data.append([
+                str(class_id),
+                class_name,
+                f"{iou_txt} {status if status != '-' else ''}",
+                f"{int(pixel_count):,}"
+            ])
+
+        # 4. Dessin du tableau
+        table = ax_table.table(cellText=table_data,
+                               colLabels=col_labels,
+                               cellLoc='center',
+                               loc='center',
+                               bbox=[0.1, 0.05, 0.8, 0.9]) # Marges
+        
+        table.auto_set_font_size(False)
+        table.set_fontsize(12)
+        table.scale(1, 1.5) # Plus aéré
+
+        # Style du header
+        for (i, j), cell in table.get_celld().items():
+            if i == 0:
+                cell.set_text_props(weight='bold', color='white')
+                cell.set_facecolor('#40466e') # Bleu foncé
+            elif i > 0 and i % 2 == 0:
+                cell.set_facecolor('#f2f2f2') # Zébrure légère pour la lisibilité
+
+        pdf.savefig(fig_global)
+        plt.close(fig_global)
         
         print("Rapport PDF généré avec succès (incluant la page de résumé final) !")
 
@@ -546,7 +627,7 @@ def calculer_metrics_segmentation(pred_mask, true_mask, num_classes=18):
     # Précision Globale : Total des bons pixels / Total des pixels
     pixel_acc = np.sum(intersection) / np.sum(cm)
     
-    return pixel_acc, miou, mean_dice
+    return pixel_acc, miou, mean_dice, cm
 
 #variables globales
 image_dir = "./images_a_segmenter/top_influenceurs_2024/IMG"  # nom du répertoire contenant les images

@@ -9,3 +9,21 @@ nuances entre les fichiers générés par poetry :
     pyproject.toml (Les contraintes) : Ce fichier liste les dépendances "logiques" avec des contraintes (ex: pandas = "^1.3"). Il dit ce que le projet aimerait avoir.
 
     poetry.lock (La vérité terrain - LE fichier clé) : Ce fichier est généré par Poetry. Il "gèle" (lock) les versions exactes de toutes les dépendances (et sous-dépendances) installées sur ta machine, y compris leur hachage cryptographique (hash). !
+
+Dans notre dernière page du pdf la colonne 'Pixels Totaux' montre la prévalence de chaque vêtement dans notre jeu de données. Elle explique pourquoi notre score global est de X% : il est fortement influencé par la réussite sur les grandes zones (le fond, les hauts) et masque les difficultés du modèle sur les petits accessoires rares.
+
+la mIoU globale est impacté par l'aire de chaque zone
+
+en résumé : "Où intervient le "poids des pixels" ?
+
+Le nombre de pixels intervient AVANT la moyenne finale, lors du calcul du score de chaque classe individuelle (iou_per_class).
+
+    Pour la classe "Robe" (fréquente) : On additionne des millions de pixels. Si le modèle se trompe sur une image, c'est noyé dans la masse. Le score est très stable.
+
+    Pour la classe "Bague" (rare) : On additionne peu de pixels. Le moindre faux pas impacte fortement le ratio TP/Union.
+
+C'est là que se joue la différence entre "Moyenne par image" et "Moyenne Globale" :
+
+    Par image : Si vous avez 10 images avec une bague, et que vous la ratez 5 fois (IoU=0) et la trouvez 5 fois (IoU=0.8). Moyenne = 0.4.
+
+    Global : On met tous les pixels de bagues des 10 images dans un sac commun. On calcule l'IoU sur ce tas global. Cela évite d'avoir des "0" tranchés qui plombent la moyenne mathématique artificiellement."
