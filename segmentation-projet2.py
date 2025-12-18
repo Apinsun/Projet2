@@ -343,8 +343,20 @@ def display_segmented_images_batch(original_image_paths, segmentation_masks,noms
             else:
                 unique_classes = []
 
+            # ajout des classes manquantes dans notre prediction
+            # 2. Classes de la Vérité Terrain
+            # On vérifie si true_mask existe (car il est créé dans un try/except)
+            if 'true_mask' in locals() and true_mask is not None:
+                classes_gt = np.unique(true_mask)
+            else:
+                classes_gt = np.array([])
+            
+            # 3. Union des deux (np.union1d trie et dédoublonne automatiquement)
+            union_unique_classes = np.union1d(unique_classes, classes_gt)
+
+
             if im is not None:
-                for val in unique_classes:
+                for val in union_unique_classes:
                     class_id = int(val)
                     try:
                         normed = im.norm(class_id)
